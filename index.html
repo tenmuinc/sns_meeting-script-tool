@@ -19,7 +19,7 @@
       if (!notionToken) return { list: [], error: "Notionトークンが未設定です" };
       try {
         const res = await fetch(
-          "https://notion-proxy.y-amano.workers.dev?database_id=33f6bc5f36614b19a47adac4d778f3ff",
+          "https://notion-proxy.y-amano.workers.dev?database_id=33f6bc5f-3661-4b19-a47a-dac4d778f3ff",
           {
             method: "GET",
             headers: { "x-notion-token": notionToken },
