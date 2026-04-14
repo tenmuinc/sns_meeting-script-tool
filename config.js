@@ -4,5 +4,5 @@
 
 const CONFIG = {
   // Notionインテグレーションのシークレットトークン（ntn_...）
-  NOTION_TOKEN: "ここにNotionトークンを貼り付け",
+  NOTION_TOKEN: "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",
 };
