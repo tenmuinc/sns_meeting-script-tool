@@ -14,28 +14,31 @@
   <script type="text/babel">
     const { useState, useRef, useEffect } = React;
 
-    // Notionからクライアント一覧を取得
-    async function fetchClientsFromNotion(token) {
-      if (!token) return [];
-      const dbId = "33f6bc5f36614b19a47adac4d778f3ff";
-      const res = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Notion-Version": "2022-06-28",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ page_size: 100 }),
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return data.results
-        .map((p) => {
-          const titleProp = Object.values(p.properties).find((v) => v.type === "title");
-          return titleProp?.title?.[0]?.plain_text || "";
-        })
-        .filter(Boolean)
-        .sort();
+    // Claude + Notion MCP経由でクライアント一覧を取得
+    async function fetchClientsFromNotion(apiKey, notionToken) {
+      if (!apiKey || !notionToken) return [];
+      try {
+        const data = await callClaude(apiKey, [
+          {
+            role: "user",
+            content: `Notionのデータベース（ID: 33f6bc5f36614b19a47adac4d778f3ff）の全ページタイトルを取得して、必ずJSON配列のみを返してください。例: ["クライアントA", "クライアントB"]`,
+          }
+        ], {
+          mcp_servers: [{
+            type: "url",
+            url: "https://mcp.notion.com/mcp",
+            name: "notion-mcp",
+            authorization_token: notionToken,
+          }],
+          max_tokens: 1000,
+        });
+        const text = data.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+        const match = text.match(/\[[\s\S]*?\]/);
+        if (match) return JSON.parse(match[0]).filter(Boolean).sort();
+        return [];
+      } catch (e) {
+        return [];
+      }
     }
 
     // ========== 設定: 対象月一覧（直近24ヶ月）==========
@@ -106,20 +109,38 @@
       const [logs, setLogs] = useState([]);
       const fileRef = useRef();
 
+      const [editingApiKey, setEditingApiKey] = useState(!localStorage.getItem("anthropic_api_key"));
+      const [editingNotionToken, setEditingNotionToken] = useState(!localStorage.getItem("notion_token"));
+      const [clientsLoading, setClientsLoading] = useState(false);
+
       const saveNotionToken = (token) => {
         setNotionToken(token);
         localStorage.setItem("notion_token", token);
       };
 
+      const loadClients = async (ak, nt) => {
+        if (!ak || !nt) return;
+        setClientsLoading(true);
+        const list = await fetchClientsFromNotion(ak, nt);
+        if (list.length > 0) {
+          setClientList(list);
+          setClientName(list[0]);
+          localStorage.setItem("client_list_cache", JSON.stringify(list));
+        }
+        setClientsLoading(false);
+      };
+
       useEffect(() => {
-        const token = localStorage.getItem("notion_token") || "";
-        if (!token) return;
-        fetchClientsFromNotion(token).then((list) => {
-          if (list.length > 0) {
-            setClientList(list);
-            setClientName(list[0]);
-          }
-        });
+        const cached = localStorage.getItem("client_list_cache");
+        if (cached) {
+          const list = JSON.parse(cached);
+          setClientList(list);
+          setClientName(list[0]);
+        } else {
+          const ak = localStorage.getItem("anthropic_api_key") || "";
+          const nt = localStorage.getItem("notion_token") || "";
+          loadClients(ak, nt);
+        }
       }, []);
 
       const addLog = (msg) => setLogs((p) => [...p, { t: new Date().toLocaleTimeString("ja-JP"), msg }]);
@@ -252,33 +273,64 @@ ${script}
 
             {/* API Keys */}
             <div style={{ background: "#fff", borderRadius: 12, padding: "16px 20px", marginBottom: 20, boxShadow: "0 1px 6px rgba(0,0,0,0.05)", display: "flex", flexDirection: "column", gap: 12 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {/* Claude API Key */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "#555", whiteSpace: "nowrap", width: 120 }}>Claude APIキー</div>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => saveApiKey(e.target.value)}
-                  placeholder="sk-ant-..."
-                  style={{ ...inputStyle, cursor: "text", flex: 1 }}
-                />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {editingApiKey ? (
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => saveApiKey(e.target.value)}
+                    onBlur={() => { if (apiKey) setEditingApiKey(false); }}
+                    placeholder="sk-ant-..."
+                    autoFocus
+                    style={{ ...inputStyle, cursor: "text", flex: 1 }}
+                  />
+                ) : (
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 600 }}>✓ 設定済み</span>
+                    <button onClick={() => setEditingApiKey(true)} style={{ fontSize: 12, color: "#999", background: "none", border: "none", cursor: "pointer", padding: "4px 8px" }}>変更</button>
+                  </div>
+                )}
+              </div>
+              {/* Notion Token */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "#555", whiteSpace: "nowrap", width: 120 }}>Notionトークン</div>
-                <input
-                  type="password"
-                  value={notionToken}
-                  onChange={(e) => {
-                    saveNotionToken(e.target.value);
-                    if (e.target.value.length > 10) {
-                      fetchClientsFromNotion(e.target.value).then((list) => {
-                        if (list.length > 0) { setClientList(list); setClientName(list[0]); }
-                      });
-                    }
-                  }}
-                  placeholder="ntn_..."
-                  style={{ ...inputStyle, cursor: "text", flex: 1 }}
-                />
-              </label>
+                {editingNotionToken ? (
+                  <input
+                    type="password"
+                    value={notionToken}
+                    onChange={(e) => saveNotionToken(e.target.value)}
+                    onBlur={() => {
+                      if (notionToken) {
+                        setEditingNotionToken(false);
+                        localStorage.removeItem("client_list_cache");
+                        loadClients(apiKey, notionToken);
+                      }
+                    }}
+                    placeholder="ntn_..."
+                    autoFocus
+                    style={{ ...inputStyle, cursor: "text", flex: 1 }}
+                  />
+                ) : (
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 600 }}>✓ 設定済み</span>
+                    <button onClick={() => setEditingNotionToken(true)} style={{ fontSize: 12, color: "#999", background: "none", border: "none", cursor: "pointer", padding: "4px 8px" }}>変更</button>
+                  </div>
+                )}
+              </div>
+              {/* クライアント更新ボタン */}
+              {!editingApiKey && !editingNotionToken && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    onClick={() => { localStorage.removeItem("client_list_cache"); loadClients(apiKey, notionToken); }}
+                    disabled={clientsLoading}
+                    style={{ fontSize: 11, color: "#888", background: "none", border: "1px solid #e0ddd6", borderRadius: 6, cursor: "pointer", padding: "4px 10px" }}
+                  >
+                    {clientsLoading ? "読み込み中..." : "クライアント一覧を更新"}
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Step indicator */}
@@ -319,10 +371,12 @@ ${script}
                         value={clientName}
                         onChange={(e) => setClientName(e.target.value)}
                         style={inputStyle}
-                        disabled={clientList.length === 0}
+                        disabled={clientsLoading || clientList.length === 0}
                       >
-                        {clientList.length === 0
+                        {clientsLoading
                           ? <option>読み込み中...</option>
+                          : clientList.length === 0
+                          ? <option>（上でキーを設定してください）</option>
                           : clientList.map((c) => <option key={c} value={c}>{c}</option>)
                         }
                       </select>
