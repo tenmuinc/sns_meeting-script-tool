@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>台本生成 → Notion書込</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef } = React;
+
+    // ========== 設定: クライアント一覧 ==========
+    const CLIENT_LIST = [
+      "ポンパドール",
+      // 必要に応じてクライアントを追加
+      // "クライアントB",
+      // "クライアントC",
+    ];
+
+    // ========== 設定: 対象月一覧（直近24ヶ月）==========
+    const MONTH_LIST = (() => {
+      const months = [];
+      const now = new Date();
+      for (let i = 0; i < 24; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        months.push(`${d.getFullYear()}年${d.getMonth() + 1}月`);
+      }
+      return months;
+    })();
+
+    const NOTION_MCP = [{ type: "url", url: "https://mcp.notion.com/mcp", name: "notion-mcp" }];
+
+    async function callClaude(apiKey, messages, options = {}) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 8000,
+          ...options,
+          messages,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`API error ${res.status}: ${err}`);
+      }
+      return res.json();
+    }
+
+    const STEPS = ["設定", "PDF", "台本確認", "Notion書込", "完了"];
+
+    const inputStyle = {
+      width: "100%",
+      padding: "10px 14px",
+      border: "1.5px solid #e0ddd6",
+      borderRadius: 8,
+      fontSize: 15,
+      boxSizing: "border-box",
+      outline: "none",
+      fontFamily: "inherit",
+      background: "#fff",
+      cursor: "pointer",
+    };
+
+    function App() {
+      const [step, setStep] = useState(0);
+      const [apiKey, setApiKey] = useState(localStorage.getItem("anthropic_api_key") || "");
+      const [clientName, setClientName] = useState(CLIENT_LIST[0]);
+      const [targetMonth, setTargetMonth] = useState(MONTH_LIST[1]); // 先月をデフォルト
+      const [pdfBase64, setPdfBase64] = useState(null);
+      const [pdfName, setPdfName] = useState("");
+      const [script, setScript] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [loadingMsg, setLoadingMsg] = useState("");
+      const [error, setError] = useState("");
+      const [notionResult, setNotionResult] = useState("");
+      const [logs, setLogs] = useState([]);
+      const fileRef = useRef();
+
+      const addLog = (msg) => setLogs((p) => [...p, { t: new Date().toLocaleTimeString("ja-JP"), msg }]);
+
+      const saveApiKey = (key) => {
+        setApiKey(key);
+        localStorage.setItem("anthropic_api_key", key);
+      };
+
+      const handleFile = (e) => {
+        const file = e.target.files[0];
+        if (!file || file.type !== "application/pdf") return;
+        setPdfName(file.name);
+        const reader = new FileReader();
+        reader.onload = (ev) => setPdfBase64(ev.target.result.split(",")[1]);
+        reader.readAsDataURL(file);
+      };
+
+      const generateScript = async () => {
+        setLoading(true);
+        setError("");
+        setLoadingMsg("PDFを解析して台本を生成しています…（1〜2分かかる場合があります）");
+        addLog("📄 台本生成開始");
+        try {
+          const data = await callClaude(apiKey, [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: { type: "base64", media_type: "application/pdf", data: pdfBase64 },
+                },
+                {
+                  type: "text",
+                  text: `あなたはSNSマーケティングの定例会で使う台本を作成する専門家です。
+添付のInstagramパフォーマンスレポート（クライアント：${clientName}、対象月：${targetMonth}）を読み込み、レポートの各ページごとに担当者が話す台本を作成してください。
+
+台本の形式ルール：
+- 各ページは「## 【Pページ番号】ページタイトル」という見出しで始める
+- そのページの内容を説明する話し言葉の台本を「」（鍵括弧）で囲んで書く
+- 数字（KPI等）は具体的に言及する
+- 前月比・目標対比に必ず触れる
+- 改善アクションページでは具体的な提案を含める
+- 担当者が読み上げやすい自然な話し言葉にする
+- ページ番号はPDFのページ順に振る`,
+                },
+              ],
+            },
+          ]);
+          const generated = data.content
+            .filter((b) => b.type === "text")
+            .map((b) => b.text)
+            .join("\n");
+          setScript(generated);
+          addLog("✅ 台本生成完了（" + generated.length + "文字）");
+          setStep(2);
+        } catch (e) {
+          setError(e.message);
+          addLog("❌ エラー: " + e.message);
+        }
+        setLoading(false);
+      };
+
+      const writeToNotion = async () => {
+        setLoading(true);
+        setError("");
+        setLoadingMsg("Notionページを作成・書き込み中…（しばらくお待ちください）");
+        addLog("🔍 Notion操作開始");
+        try {
+          const data = await callClaude(
+            apiKey,
+            [
+              {
+                role: "user",
+                content: `以下の手順でNotionを操作してください。
+
+【手順】
+1. Notionを検索して「${clientName}」というクライアントのページを見つけてください
+2. そのページの子ページとして「${targetMonth} 定例会」というタイトルで新しいページを作成してください
+3. 作成したページに以下の構造でコンテンツを追加してください：
+
+まず heading_2 ブロックで「今月メモ」を追加し、その下に空の bulleted_list_item を3つ追加してください。
+
+次に heading_2 ブロックで「過去タスク」を追加し、その下に paragraph ブロックで「（前回定例会のタスクを確認・追記してください）」を追加してください。
+
+最後に heading_2 ブロックで「今月の台本」を追加し、その下に以下の台本を段落ごとに paragraph ブロックとして追加してください：
+
+---
+${script}
+---
+
+すべての操作が完了したら、作成したページのURLを報告してください。`,
+              },
+            ],
+            {
+              mcp_servers: NOTION_MCP,
+              max_tokens: 4000,
+            }
+          );
+          const result = data.content
+            .filter((b) => b.type === "text")
+            .map((b) => b.text)
+            .join("\n");
+          setNotionResult(result);
+          addLog("✅ Notionページ書き込み完了");
+          setStep(4);
+        } catch (e) {
+          setError(e.message);
+          addLog("❌ エラー: " + e.message);
+        }
+        setLoading(false);
+      };
+
+      const urlMatch = notionResult.match(/https:\/\/www\.notion\.so\/[^\s)]+/);
+      const notionUrl = urlMatch ? urlMatch[0] : null;
+
+      return (
+        <div style={{ fontFamily: "'Hiragino Sans', 'Meiryo', sans-serif", minHeight: "100vh", background: "#f5f4f0", padding: "32px 16px" }}>
+          <div style={{ maxWidth: 720, margin: "0 auto" }}>
+
+            {/* Header */}
+            <div style={{ marginBottom: 32 }}>
+              <div style={{ fontSize: 11, letterSpacing: "0.15em", color: "#888", textTransform: "uppercase", marginBottom: 6 }}>
+                定例会 自動化ツール
+              </div>
+              <h1 style={{ fontSize: 22, fontWeight: 700, color: "#1a1a1a", margin: 0 }}>
+                台本生成 → Notion書込
+              </h1>
+            </div>
+
+            {/* API Key */}
+            <div style={{ background: "#fff", borderRadius: 12, padding: "16px 20px", marginBottom: 20, boxShadow: "0 1px 6px rgba(0,0,0,0.05)" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#555", whiteSpace: "nowrap" }}>APIキー</div>
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => saveApiKey(e.target.value)}
+                  placeholder="sk-ant-..."
+                  style={{ ...inputStyle, cursor: "text", flex: 1 }}
+                />
+              </label>
+            </div>
+
+            {/* Step indicator */}
+            <div style={{ display: "flex", alignItems: "center", gap: 0, marginBottom: 32 }}>
+              {STEPS.map((s, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", flex: i < STEPS.length - 1 ? 1 : "none" }}>
+                  <div style={{
+                    width: 28, height: 28, borderRadius: "50%",
+                    background: i < step ? "#1a1a1a" : i === step ? "#1a1a1a" : "#e0ddd6",
+                    color: i <= step ? "#fff" : "#999",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 11, fontWeight: 700, flexShrink: 0,
+                    transition: "all 0.3s"
+                  }}>
+                    {i < step ? "✓" : i + 1}
+                  </div>
+                  <div style={{ fontSize: 11, color: i === step ? "#1a1a1a" : "#999", marginLeft: 6, marginRight: 4, fontWeight: i === step ? 700 : 400, whiteSpace: "nowrap" }}>
+                    {s}
+                  </div>
+                  {i < STEPS.length - 1 && (
+                    <div style={{ flex: 1, height: 1, background: i < step ? "#1a1a1a" : "#e0ddd6", margin: "0 8px", transition: "all 0.3s" }} />
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Card */}
+            <div style={{ background: "#fff", borderRadius: 16, padding: 32, boxShadow: "0 2px 12px rgba(0,0,0,0.06)", marginBottom: 24 }}>
+
+              {/* Step 0: Settings */}
+              {step === 0 && (
+                <div>
+                  <h2 style={{ fontSize: 16, fontWeight: 700, marginTop: 0, marginBottom: 24, color: "#1a1a1a" }}>① クライアント・対象月を設定</h2>
+                  <div style={{ display: "grid", gap: 16 }}>
+                    <label style={{ display: "block" }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#555", marginBottom: 6 }}>クライアント名</div>
+                      <select
+                        value={clientName}
+                        onChange={(e) => setClientName(e.target.value)}
+                        style={inputStyle}
+                      >
+                        {CLIENT_LIST.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label style={{ display: "block" }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#555", marginBottom: 6 }}>対象月</div>
+                      <select
+                        value={targetMonth}
+                        onChange={(e) => setTargetMonth(e.target.value)}
+                        style={inputStyle}
+                      >
+                        {MONTH_LIST.map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <button
+                    onClick={() => setStep(1)}
+                    disabled={!clientName || !targetMonth || !apiKey}
+                    style={{ marginTop: 24, padding: "12px 28px", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: (!clientName || !targetMonth || !apiKey) ? 0.4 : 1 }}
+                  >
+                    次へ →
+                  </button>
+                  {!apiKey && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: "#b91c1c" }}>上のAPIキーを入力してください</div>
+                  )}
+                </div>
+              )}
+
+              {/* Step 1: PDF Upload */}
+              {step === 1 && (
+                <div>
+                  <h2 style={{ fontSize: 16, fontWeight: 700, marginTop: 0, marginBottom: 8, color: "#1a1a1a" }}>レポートPDFをアップロード</h2>
+                  <div style={{ fontSize: 13, color: "#666", marginBottom: 24 }}>
+                    {clientName}｜{targetMonth}
+                  </div>
+                  <div
+                    onClick={() => fileRef.current.click()}
+                    style={{
+                      border: "2px dashed " + (pdfBase64 ? "#1a1a1a" : "#d0cdc6"),
+                      borderRadius: 12, padding: "40px 24px", textAlign: "center", cursor: "pointer",
+                      background: pdfBase64 ? "#f8f7f4" : "#fafaf8",
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    <div style={{ fontSize: 32, marginBottom: 12 }}>{pdfBase64 ? "✅" : "📄"}</div>
+                    {pdfBase64 ? (
+                      <div>
+                        <div style={{ fontWeight: 600, color: "#1a1a1a", marginBottom: 4 }}>{pdfName}</div>
+                        <div style={{ fontSize: 12, color: "#888" }}>クリックして変更</div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div style={{ fontWeight: 600, color: "#555", marginBottom: 4 }}>PDFをクリックして選択</div>
+                        <div style={{ fontSize: 12, color: "#999" }}>Instagramパフォーマンスレポート</div>
+                      </div>
+                    )}
+                    <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ display: "none" }} />
+                  </div>
+
+                  <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
+                    <button onClick={() => setStep(0)} style={{ padding: "12px 20px", background: "none", color: "#555", border: "1.5px solid #e0ddd6", borderRadius: 8, fontSize: 14, cursor: "pointer" }}>
+                      ← 戻る
+                    </button>
+                    <button
+                      onClick={generateScript}
+                      disabled={!pdfBase64 || loading}
+                      style={{ flex: 1, padding: "12px 28px", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: (!pdfBase64 || loading) ? 0.4 : 1 }}
+                    >
+                      {loading ? loadingMsg : "台本を生成する →"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Step 2: Script Review */}
+              {step === 2 && (
+                <div>
+                  <h2 style={{ fontSize: 16, fontWeight: 700, marginTop: 0, marginBottom: 8, color: "#1a1a1a" }}>台本を確認・編集</h2>
+                  <div style={{ fontSize: 13, color: "#666", marginBottom: 16 }}>
+                    {clientName}｜{targetMonth}｜{script.length}文字
+                  </div>
+                  <textarea
+                    value={script}
+                    onChange={(e) => setScript(e.target.value)}
+                    style={{
+                      width: "100%", minHeight: 400, padding: "16px", border: "1.5px solid #e0ddd6",
+                      borderRadius: 10, fontSize: 13, lineHeight: 1.8, fontFamily: "inherit",
+                      boxSizing: "border-box", resize: "vertical", color: "#1a1a1a", background: "#fafaf8",
+                      outline: "none"
+                    }}
+                  />
+                  <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
+                    <button onClick={() => setStep(1)} style={{ padding: "12px 20px", background: "none", color: "#555", border: "1.5px solid #e0ddd6", borderRadius: 8, fontSize: 14, cursor: "pointer" }}>
+                      ← 戻る
+                    </button>
+                    <button
+                      onClick={() => setStep(3)}
+                      disabled={!script}
+                      style={{ flex: 1, padding: "12px 28px", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: !script ? 0.4 : 1 }}
+                    >
+                      Notionに書き込む →
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Step 3: Notion Write Confirmation */}
+              {step === 3 && (
+                <div>
+                  <h2 style={{ fontSize: 16, fontWeight: 700, marginTop: 0, marginBottom: 24, color: "#1a1a1a" }}>Notionに書き込む</h2>
+                  <div style={{ background: "#f5f4f0", borderRadius: 10, padding: 20, marginBottom: 24 }}>
+                    <div style={{ fontSize: 13, color: "#555", marginBottom: 8 }}>書き込み内容</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "#1a1a1a", marginBottom: 4 }}>作成ページ：{clientName} ＞ {targetMonth} 定例会</div>
+                    <div style={{ fontSize: 13, color: "#666" }}>
+                      構成：今月メモ（空欄×3）→ 過去タスク → 今月の台本
+                    </div>
+                  </div>
+                  {loading && (
+                    <div style={{ textAlign: "center", padding: "20px 0", color: "#555", fontSize: 13 }}>
+                      <div style={{ fontSize: 24, marginBottom: 8 }}>⟳</div>
+                      <div>{loadingMsg}</div>
+                    </div>
+                  )}
+                  {!loading && (
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <button onClick={() => setStep(2)} style={{ padding: "12px 20px", background: "none", color: "#555", border: "1.5px solid #e0ddd6", borderRadius: 8, fontSize: 14, cursor: "pointer" }}>
+                        ← 戻る
+                      </button>
+                      <button
+                        onClick={writeToNotion}
+                        style={{ flex: 1, padding: "12px 28px", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+                      >
+                        実行する →
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Step 4: Done */}
+              {step === 4 && (
+                <div style={{ textAlign: "center", padding: "16px 0" }}>
+                  <div style={{ fontSize: 48, marginBottom: 16 }}>🎉</div>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1a1a1a", margin: "0 0 8px" }}>完了しました</h2>
+                  <div style={{ fontSize: 14, color: "#666", marginBottom: 24 }}>
+                    {clientName}｜{targetMonth} 定例会ページをNotionに作成しました
+                  </div>
+                  {notionUrl && (
+                    <a
+                      href={notionUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ display: "inline-block", padding: "12px 28px", background: "#1a1a1a", color: "#fff", borderRadius: 8, textDecoration: "none", fontSize: 14, fontWeight: 600, marginBottom: 24 }}
+                    >
+                      Notionで開く →
+                    </a>
+                  )}
+                  <div style={{ background: "#f5f4f0", borderRadius: 10, padding: 16, textAlign: "left" }}>
+                    <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Notionからの応答</div>
+                    <div style={{ fontSize: 13, color: "#444", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{notionResult}</div>
+                  </div>
+                  <button
+                    onClick={() => { setStep(0); setScript(""); setPdfBase64(null); setPdfName(""); setNotionResult(""); setLogs([]); setError(""); }}
+                    style={{ marginTop: 20, padding: "10px 20px", background: "none", color: "#555", border: "1.5px solid #e0ddd6", borderRadius: 8, fontSize: 13, cursor: "pointer" }}
+                  >
+                    最初からやり直す
+                  </button>
+                </div>
+              )}
+
+              {/* Error */}
+              {error && (
+                <div style={{ marginTop: 16, padding: "12px 16px", background: "#fff5f5", border: "1px solid #fecaca", borderRadius: 8, fontSize: 13, color: "#b91c1c" }}>
+                  ⚠️ {error}
+                </div>
+              )}
+            </div>
+
+            {/* Log */}
+            {logs.length > 0 && (
+              <div style={{ background: "#1a1a1a", borderRadius: 12, padding: "16px 20px" }}>
+                <div style={{ fontSize: 11, color: "#666", marginBottom: 10, letterSpacing: "0.1em" }}>LOG</div>
+                {logs.map((l, i) => (
+                  <div key={i} style={{ fontSize: 12, color: "#aaa", marginBottom: 4, fontFamily: "monospace" }}>
+                    <span style={{ color: "#555", marginRight: 10 }}>{l.t}</span>{l.msg}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
