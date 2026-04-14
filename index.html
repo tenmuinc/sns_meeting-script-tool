@@ -367,19 +367,27 @@ ${script}
                   <div style={{ display: "grid", gap: 16 }}>
                     <label style={{ display: "block" }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: "#555", marginBottom: 6 }}>クライアント名</div>
-                      <select
-                        value={clientName}
-                        onChange={(e) => setClientName(e.target.value)}
-                        style={inputStyle}
-                        disabled={clientsLoading || clientList.length === 0}
-                      >
-                        {clientsLoading
-                          ? <option>読み込み中...</option>
-                          : clientList.length === 0
-                          ? <option>（上でキーを設定してください）</option>
-                          : clientList.map((c) => <option key={c} value={c}>{c}</option>)
-                        }
-                      </select>
+                      {clientsLoading ? (
+                        <select style={inputStyle} disabled>
+                          <option>読み込み中...</option>
+                        </select>
+                      ) : clientList.length > 0 ? (
+                        <select
+                          value={clientName}
+                          onChange={(e) => setClientName(e.target.value)}
+                          style={inputStyle}
+                        >
+                          {clientList.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={clientName}
+                          onChange={(e) => setClientName(e.target.value)}
+                          placeholder="クライアント名を入力してください"
+                          style={{ ...inputStyle, cursor: "text" }}
+                        />
+                      )}
                     </label>
                     <label style={{ display: "block" }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: "#555", marginBottom: 6 }}>対象月</div>
