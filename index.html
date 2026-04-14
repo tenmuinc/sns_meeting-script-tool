@@ -15,9 +15,8 @@
     const { useState, useRef, useEffect } = React;
 
     // Notionからクライアント一覧を取得
-    async function fetchClientsFromNotion() {
-      const token = (typeof CONFIG !== "undefined" && CONFIG.NOTION_TOKEN) || "";
-      if (!token || token.includes("ここに")) return [];
+    async function fetchClientsFromNotion(token) {
+      if (!token) return [];
       const dbId = "33f6bc5f36614b19a47adac4d778f3ff";
       const res = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
         method: "POST",
@@ -93,6 +92,7 @@
     function App() {
       const [step, setStep] = useState(0);
       const [apiKey, setApiKey] = useState(localStorage.getItem("anthropic_api_key") || "");
+      const [notionToken, setNotionToken] = useState(localStorage.getItem("notion_token") || "");
       const [clientList, setClientList] = useState([]);
       const [clientName, setClientName] = useState("");
       const [targetMonth, setTargetMonth] = useState(MONTH_LIST[1]); // 先月をデフォルト
@@ -106,8 +106,15 @@
       const [logs, setLogs] = useState([]);
       const fileRef = useRef();
 
+      const saveNotionToken = (token) => {
+        setNotionToken(token);
+        localStorage.setItem("notion_token", token);
+      };
+
       useEffect(() => {
-        fetchClientsFromNotion().then((list) => {
+        const token = localStorage.getItem("notion_token") || "";
+        if (!token) return;
+        fetchClientsFromNotion(token).then((list) => {
           if (list.length > 0) {
             setClientList(list);
             setClientName(list[0]);
@@ -243,15 +250,32 @@ ${script}
               </h1>
             </div>
 
-            {/* API Key */}
-            <div style={{ background: "#fff", borderRadius: 12, padding: "16px 20px", marginBottom: 20, boxShadow: "0 1px 6px rgba(0,0,0,0.05)" }}>
+            {/* API Keys */}
+            <div style={{ background: "#fff", borderRadius: 12, padding: "16px 20px", marginBottom: 20, boxShadow: "0 1px 6px rgba(0,0,0,0.05)", display: "flex", flexDirection: "column", gap: 12 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#555", whiteSpace: "nowrap" }}>APIキー</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#555", whiteSpace: "nowrap", width: 120 }}>Claude APIキー</div>
                 <input
                   type="password"
                   value={apiKey}
                   onChange={(e) => saveApiKey(e.target.value)}
                   placeholder="sk-ant-..."
+                  style={{ ...inputStyle, cursor: "text", flex: 1 }}
+                />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#555", whiteSpace: "nowrap", width: 120 }}>Notionトークン</div>
+                <input
+                  type="password"
+                  value={notionToken}
+                  onChange={(e) => {
+                    saveNotionToken(e.target.value);
+                    if (e.target.value.length > 10) {
+                      fetchClientsFromNotion(e.target.value).then((list) => {
+                        if (list.length > 0) { setClientList(list); setClientName(list[0]); }
+                      });
+                    }
+                  }}
+                  placeholder="ntn_..."
                   style={{ ...inputStyle, cursor: "text", flex: 1 }}
                 />
               </label>
