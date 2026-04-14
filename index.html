@@ -27,6 +27,7 @@
         );
         if (!res.ok) throw new Error(`Proxy error: ${res.status}`);
         const data = await res.json();
+        if (!data.results) throw new Error("Notionからデータを取得できませんでした: " + JSON.stringify(data).substring(0, 100));
         const list = data.results.map(page => {
           const props = page.properties;
           const titleProp = Object.values(props).find(p => p.type === "title");
