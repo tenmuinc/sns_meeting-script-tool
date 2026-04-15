@@ -198,18 +198,21 @@
 添付のInstagramパフォーマンスレポート（クライアント：${clientName}、対象月：${targetMonth}）を読み込み、定例会で担当者が話す台本を作成してください。
 
 【台本作成の方針】
-- 単なる数字の読み上げではなく「この数字が意味すること・なぜ重要か」を言語化する
-- 前月比・目標対比を必ず取り上げ、良い点は自信を持って、課題は原因と改善策とセットで伝える
+各ページについて以下の3点を必ず盛り込んでください：
+1. 結果を伝える：具体的な数字とともに今月の結果を明確に伝える
+2. なぜこの数値になったかを伝える：その数値になった要因・背景を分析して説明する
+3. ここからわかることを伝える：数値から読み取れるインサイト・示唆・次のアクションを伝える
+
+その他のルール：
+- 前月比・目標対比を必ず取り上げる
 - 数字的根拠を必ずメインに据え、「〇〇が△△%増加した理由は〜」という形で説明する
-- クライアントが「なるほど」と感じる洞察・示唆を必ず含める
-- 次月に向けた具体的なアクション提案を含める
+- クライアントが「なるほど」と感じる洞察を必ず含める
 - 担当者がそのまま読み上げられる自然な話し言葉で書く
+- 1ページあたり8〜12文程度でしっかり説明する
 
 【台本の形式】
 - 各セクションは「## 【Pページ番号】ページタイトル」で始める
-- 話す内容は「」（鍵括弧）で囲む
-- 数字は具体的に（例：「先月比で+15%の伸び」）
-- 1ページあたり3〜5文程度でテンポよく`,
+- 話す内容は「」（鍵括弧）で囲む`,
                 },
               ],
             },
@@ -228,52 +231,61 @@
         setLoading(false);
       };
 
+      const notionProxy = async (path, method, body) => {
+        const res = await fetch(
+          `https://notion-proxy.y-amano.workers.dev?path=${encodeURIComponent(path)}`,
+          {
+            method,
+            headers: { "x-notion-token": notionToken, "Content-Type": "application/json" },
+            body: body ? JSON.stringify(body) : undefined,
+          }
+        );
+        return res.json();
+      };
+
       const writeToNotion = async () => {
         setLoading(true);
         setError("");
-        setLoadingMsg("Notionページを作成・書き込み中…（しばらくお待ちください）");
+        setLoadingMsg("Notionページを作成・書き込み中…");
         addLog("🔍 Notion操作開始");
         try {
-          const data = await callClaude(
-            apiKey,
-            [
-              {
-                role: "user",
-                content: `以下の手順でNotionを操作してください。
+          // 1. 顧客データベースからクライアントのページIDを検索
+          addLog("🔍 クライアントページを検索中...");
+          const searchRes = await notionProxy(`databases/ed23c3c0e73c49b1868751bd9326d181/query`, "POST", {
+            filter: { property: "名前", title: { equals: clientName } },
+            page_size: 1,
+          });
+          if (!searchRes.results || searchRes.results.length === 0) {
+            throw new Error(`「${clientName}」のページが見つかりませんでした`);
+          }
+          const parentPageId = searchRes.results[0].id;
+          addLog("✅ クライアントページ発見: " + parentPageId);
 
-【手順】
-1. Notionを検索して「${clientName}」というクライアントのページを見つけてください
-2. そのページの子ページとして「${targetMonth} 定例会」というタイトルで新しいページを作成してください
-3. 作成したページに以下の構造でコンテンツを追加してください：
-
-まず heading_2 ブロックで「今月メモ」を追加し、その下に空の bulleted_list_item を3つ追加してください。
-
-次に heading_2 ブロックで「過去タスク」を追加し、その下に paragraph ブロックで「（前回定例会のタスクを確認・追記してください）」を追加してください。
-
-最後に heading_2 ブロックで「今月の台本」を追加し、その下に以下の台本を段落ごとに paragraph ブロックとして追加してください：
-
----
-${script}
----
-
-すべての操作が完了したら、作成したページのURLを報告してください。`,
-              },
+          // 2. 定例会ページを作成
+          addLog("📝 定例会ページを作成中...");
+          const newPage = await notionProxy("pages", "POST", {
+            parent: { page_id: parentPageId },
+            properties: {
+              title: { title: [{ text: { content: `${targetMonth} 定例会` } }] },
+            },
+            children: [
+              { object: "block", type: "heading_2", heading_2: { rich_text: [{ text: { content: "今月メモ" } }] } },
+              { object: "block", type: "bulleted_list_item", bulleted_list_item: { rich_text: [] } },
+              { object: "block", type: "bulleted_list_item", bulleted_list_item: { rich_text: [] } },
+              { object: "block", type: "bulleted_list_item", bulleted_list_item: { rich_text: [] } },
+              { object: "block", type: "heading_2", heading_2: { rich_text: [{ text: { content: "過去タスク" } }] } },
+              { object: "block", type: "paragraph", paragraph: { rich_text: [{ text: { content: "（前回定例会のタスクを確認・追記してください）" } }] } },
+              { object: "block", type: "heading_2", heading_2: { rich_text: [{ text: { content: "今月の台本" } }] } },
+              ...script.split("\n").filter(Boolean).map(line => ({
+                object: "block", type: "paragraph",
+                paragraph: { rich_text: [{ text: { content: line } }] },
+              })),
             ],
-            {
-              mcp_servers: [{
-                type: "url",
-                url: "https://mcp.notion.com/mcp",
-                name: "notion-mcp",
-                authorization_token: notionToken,
-              }],
-              max_tokens: 4000,
-            }
-          );
-          const result = data.content
-            .filter((b) => b.type === "text")
-            .map((b) => b.text)
-            .join("\n");
-          setNotionResult(result);
+          });
+
+          if (!newPage.url) throw new Error("ページ作成に失敗しました: " + JSON.stringify(newPage).substring(0, 100));
+
+          setNotionResult(newPage.url);
           addLog("✅ Notionページ書き込み完了");
           setStep(4);
         } catch (e) {
@@ -283,8 +295,7 @@ ${script}
         setLoading(false);
       };
 
-      const urlMatch = notionResult.match(/https:\/\/www\.notion\.so\/[^\s)]+/);
-      const notionUrl = urlMatch ? urlMatch[0] : null;
+      const notionUrl = notionResult && notionResult.startsWith("http") ? notionResult : null;
 
       return (
         <div style={{ fontFamily: "'Hiragino Sans', 'Meiryo', sans-serif", minHeight: "100vh", background: "#f5f4f0", padding: "32px 16px" }}>
