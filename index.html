@@ -281,7 +281,7 @@
 
           // 4. 議事録DBにページを作成
           addLog("📝 議事録ページを作成中...");
-          const titleStr = `【定例会】${targetMonth.replace("年",".").replace("月","")}`;
+          const titleStr = `【定例会】${today.getFullYear()}.${String(today.getMonth()+1).padStart(2,"0")}`;
           const newPage = await notionProxy("pages", "POST", {
             parent: { database_id: gijiroDatabaseId },
             properties: {
