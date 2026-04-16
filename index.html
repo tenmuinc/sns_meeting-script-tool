@@ -289,14 +289,26 @@
           const clientPageId = clientPage.id;
           addLog("✅ クライアントページ発見");
 
-          // 2. 議事録データベースを検索
+          // 2. 議事録データベースを検索（ページネーション対応）
           addLog("🔍 議事録DBを検索中...");
-          const blocksRes = await notionProxy(`blocks/${clientPageId}/children`, "GET");
-          if (!blocksRes.results) throw new Error("ブロック取得失敗");
-          const gijiroBlock = blocksRes.results.find(b =>
-            b.type === "child_database" && b.child_database?.title?.includes("議事録")
+          let allBlocks = [];
+          let hasMore = true;
+          let startCursor = undefined;
+          while (hasMore) {
+            const query = startCursor ? `page_size=100&start_cursor=${startCursor}` : "page_size=100";
+            const blocksRes = await notionProxy(`blocks/${clientPageId}/children?${query}`, "GET");
+            if (!blocksRes.results) throw new Error("ブロック取得失敗");
+            allBlocks = allBlocks.concat(blocksRes.results);
+            hasMore = blocksRes.has_more;
+            startCursor = blocksRes.next_cursor;
+          }
+          addLog(`📋 ブロック${allBlocks.length}件取得`);
+          const databases = allBlocks.filter(b => b.type === "child_database");
+          addLog(`📋 DB${databases.length}件: ${databases.map(b => b.child_database?.title).join(", ")}`);
+          const gijiroBlock = databases.find(b =>
+            b.child_database?.title?.includes("議事録")
           );
-          if (!gijiroBlock) throw new Error("議事録データベースが見つかりませんでした");
+          if (!gijiroBlock) throw new Error("議事録データベースが見つかりませんでした（DB一覧: " + databases.map(b => b.child_database?.title).join(", ") + "）");
           const gijiroDatabaseId = gijiroBlock.id;
           addLog("✅ 議事録DB発見");
 
