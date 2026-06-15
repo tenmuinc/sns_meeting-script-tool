@@ -7,6 +7,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="config.js"></script>
 </head>
 <body>
@@ -129,6 +130,8 @@
       const [targetMonth, setTargetMonth] = useState(MONTH_LIST[1]); // 先月をデフォルト
       const [pdfBase64, setPdfBase64] = useState(null);
       const [pdfName, setPdfName] = useState("");
+      const [excelText, setExcelText] = useState("");   // CSV化された Excel データ
+      const [excelName, setExcelName] = useState("");
       const [script, setScript] = useState("");
       const [loading, setLoading] = useState(false);
       const [loadingMsg, setLoadingMsg] = useState("");
@@ -136,6 +139,7 @@
       const [notionResult, setNotionResult] = useState("");
       const [logs, setLogs] = useState([]);
       const fileRef = useRef();
+      const excelRef = useRef();
 
       const [editingApiKey, setEditingApiKey] = useState(!localStorage.getItem("anthropic_api_key"));
       const [editingNotionToken, setEditingNotionToken] = useState(!localStorage.getItem("notion_token"));
@@ -183,43 +187,165 @@
         localStorage.setItem("anthropic_api_key", key);
       };
 
-      const handleFile = (e) => {
-        const file = e.target.files[0];
-        if (!file || file.type !== "application/pdf") return;
-        setPdfName(file.name);
-        const reader = new FileReader();
-        reader.onload = (ev) => setPdfBase64(ev.target.result.split(",")[1]);
-        reader.readAsDataURL(file);
+      const isPdf = (f) => f && (f.type === "application/pdf" || /\.pdf$/i.test(f.name));
+      const isExcel = (f) => f && (
+        f.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+        f.type === "application/vnd.ms-excel" ||
+        f.type === "text/csv" ||
+        /\.(xlsx|xls|csv)$/i.test(f.name)
+      );
+
+      const ingestFile = (file) => {
+        if (!file) return;
+        if (isPdf(file)) {
+          setPdfName(file.name);
+          const reader = new FileReader();
+          reader.onload = (ev) => setPdfBase64(ev.target.result.split(",")[1]);
+          reader.readAsDataURL(file);
+          return;
+        }
+        if (isExcel(file)) {
+          setExcelName(file.name);
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              const data = new Uint8Array(ev.target.result);
+              const wb = XLSX.read(data, { type: "array" });
+              // 全シートを CSV テキストに変換して結合
+              const parts = wb.SheetNames.map((name) => {
+                const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name], { blankrows: false });
+                return `### Sheet: ${name}\n${csv}`;
+              });
+              setExcelText(parts.join("\n\n"));
+            } catch (err) {
+              setExcelName("");
+              setExcelText("");
+              setError("Excel ファイルの読み込みに失敗しました: " + (err.message || err));
+            }
+          };
+          reader.readAsArrayBuffer(file);
+        }
       };
+
+      const handleFile = (e) => ingestFile(e.target.files[0]);
+      const handleExcel = (e) => ingestFile(e.target.files[0]);
 
       const handleDrop = (e) => {
         e.preventDefault();
-        const file = e.dataTransfer.files[0];
-        if (!file || file.type !== "application/pdf") return;
-        setPdfName(file.name);
-        const reader = new FileReader();
-        reader.onload = (ev) => setPdfBase64(ev.target.result.split(",")[1]);
-        reader.readAsDataURL(file);
+        const files = e.dataTransfer.files;
+        for (const f of files) ingestFile(f);
+      };
+
+      // クライアントページから 議事録 DB を特定する。writeToNotion と同じ優先順位ロジック。
+      // 議事録 DB が見つかれば過去エントリも取得して台本に使う。
+      const findGijiroDbAndPast = async () => {
+        try {
+          if (!notionToken || !clientName) return { gijiroDb: null, pastText: "" };
+          const clientRes = await notionProxy(`databases/ed23c3c0e73c49b1868751bd9326d181/query`, "POST", {});
+          if (!clientRes?.results) return { gijiroDb: null, pastText: "" };
+          const clientPage = clientRes.results.find(p => {
+            const props = p.properties;
+            const tp = Object.values(props).find(pr => pr.type === "title");
+            const n = tp?.title?.[0]?.plain_text || "";
+            return n === clientName;
+          });
+          if (!clientPage) return { gijiroDb: null, pastText: "" };
+          const clientPageId = clientPage.id;
+          const searchRes = await notionProxy("search", "POST", {
+            query: "議事録",
+            filter: { value: "database", property: "object" },
+            page_size: 20,
+          });
+          if (!searchRes?.results) return { gijiroDb: null, pastText: "" };
+          const KW = ["議事録", "定例会", "ミーティング", "meeting"];
+          const cands = searchRes.results.filter(d => {
+            const t = (d.title || []).map(x => x.plain_text || "").join("");
+            return KW.some(k => t.includes(k));
+          });
+          if (!cands.length) return { gijiroDb: null, pastText: "" };
+          const norm = s => String(s||"").replace(/-/g,"");
+          const cidn = norm(clientPageId);
+          let db = cands.find(d => d.parent?.type === "page_id" && norm(d.parent.page_id) === cidn);
+          if (!db) {
+            for (const d of cands) {
+              let p = d.parent;
+              const seen = new Set();
+              for (let i=0;i<6;i++) {
+                if (!p) break;
+                if (p.type === "page_id" && p.page_id) {
+                  if (norm(p.page_id) === cidn) { db = d; break; }
+                  if (seen.has(norm(p.page_id))) break;
+                  seen.add(norm(p.page_id));
+                  try { const x = await notionProxy(`pages/${norm(p.page_id)}`, "GET"); p = x?.parent; } catch { break; }
+                } else if (p.type === "database_id" && p.database_id) {
+                  try { const x = await notionProxy(`databases/${norm(p.database_id)}`, "GET"); p = x?.parent; } catch { break; }
+                } else break;
+              }
+              if (db) break;
+            }
+          }
+          if (!db && clientName) db = cands.find(d => (d.title||[]).map(x=>x.plain_text||"").join("").includes(clientName));
+          if (!db) return { gijiroDb: null, pastText: "" };
+
+          // 過去エントリを 3 件まで取得（最新順）
+          const q = await notionProxy(`databases/${norm(db.id)}/query`, "POST", { page_size: 5, sorts: [{ timestamp: "created_time", direction: "descending" }] });
+          if (!q?.results) return { gijiroDb: db, pastText: "" };
+          const pastPages = q.results.slice(0, 3);
+          const blocks = [];
+          for (const p of pastPages) {
+            try {
+              const props = p.properties || {};
+              const tp = Object.values(props).find(pr => pr.type === "title");
+              const title = (tp?.title || []).map(x => x.plain_text || "").join("") || "(無題)";
+              const r = await notionProxy(`blocks/${norm(p.id)}/children?page_size=100`, "GET");
+              const txt = (r?.results || []).map(b => {
+                const t = b[b.type];
+                if (!t) return "";
+                if (Array.isArray(t.rich_text)) return t.rich_text.map(x => x.plain_text || "").join("");
+                return "";
+              }).filter(Boolean).join("\n");
+              blocks.push(`### ${title}\n${txt.slice(0, 3500)}`);
+            } catch {}
+          }
+          return { gijiroDb: db, pastText: blocks.join("\n\n---\n\n") };
+        } catch { return { gijiroDb: null, pastText: "" }; }
       };
 
       const generateScript = async () => {
         setLoading(true);
         setError("");
-        setLoadingMsg("PDFを解析して台本を生成しています…（1〜2分かかる場合があります）");
+        setLoadingMsg("過去議事録を取得中…");
         addLog("📄 台本生成開始");
         try {
-          const data = await callClaude(apiKey, [
+          // 1) 過去議事録を取得（あれば）
+          const { pastText } = await findGijiroDbAndPast();
+          if (pastText) addLog(`📚 過去議事録 ${pastText.split("---").length}件を参考にします`);
+
+          setLoadingMsg("PDFを解析して台本を生成しています…（1〜2分かかる場合があります）");
+
+          // 2) Claude に投げるメッセージを組み立て
+          const content = [
             {
-              role: "user",
-              content: [
-                {
-                  type: "document",
-                  source: { type: "base64", media_type: "application/pdf", data: pdfBase64 },
-                },
-                {
-                  type: "text",
-                  text: `あなたはSNSマーケティングの定例会で使う台本を作成する専門家です。
-添付のInstagramパフォーマンスレポート（クライアント：${clientName}、対象月：${targetMonth}）を読み込み、定例会で担当者が話す台本を作成してください。
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: pdfBase64 },
+            },
+          ];
+          if (excelText) {
+            content.push({
+              type: "text",
+              text: `【参考: 補足エクセルデータ（${excelName}）】\n${excelText.slice(0, 50000)}`,
+            });
+          }
+          if (pastText) {
+            content.push({
+              type: "text",
+              text: `【過去の定例会議事録（直近最大3件）】\n${pastText}`,
+            });
+          }
+          content.push({
+            type: "text",
+            text: `あなたはSNSマーケティングの定例会で使う台本を作成する専門家です。
+添付のInstagramパフォーマンスレポート（クライアント：${clientName}、対象月：${targetMonth}）と${excelText?"、補足のエクセルデータ":""}${pastText?"、過去の定例会議事録":""}を読み込み、定例会で担当者が話す台本を作成してください。
 
 【台本作成の方針】
 各ページについて以下の3点を必ず盛り込んでください：
@@ -227,19 +353,26 @@
 2. なぜこの数値になったかを伝える：その数値になった要因・背景を分析して説明する
 3. ここからわかることを伝える：数値から読み取れるインサイト・示唆・次のアクションを伝える
 
-その他のルール：
+${pastText ? `【今回は特に「過去との比較」を必ず織り込む】
+- 過去の議事録で言及されていた数値・施策・課題と今月の状況を対比する
+- 「先月の議事録では〜と申し上げましたが、今月は〜」「2ヶ月前と比べて〜」のように、過去の発言や状況に触れる
+- 過去から続けてきた取り組みの成果や、改善・悪化トレンドを明示する
+- 過去の課題に対する打ち手の結果を必ず振り返る
+
+` : ""}その他のルール：
 - 前月比・目標対比を必ず取り上げる
 - 数字的根拠を必ずメインに据え、「〇〇が△△%増加した理由は〜」という形で説明する
 - クライアントが「なるほど」と感じる洞察を必ず含める
 - 担当者がそのまま読み上げられる自然な話し言葉で書く
 - 1ページあたり8〜12文程度でしっかり説明する
-
+${excelText ? "- 添付のエクセルデータの数値も適宜引用し、PDF だけでは見えない傾向も補足する\n" : ""}
 【台本の形式】
 - 各セクションは「## 【Pページ番号】ページタイトル」で始める
 - 話す内容は「」（鍵括弧）で囲む`,
-                },
-              ],
-            },
+          });
+
+          const data = await callClaude(apiKey, [
+            { role: "user", content },
           ]);
           const generated = data.content
             .filter((b) => b.type === "text")
@@ -649,10 +782,10 @@
                 </div>
               )}
 
-              {/* Step 1: PDF Upload */}
+              {/* Step 1: PDF Upload + optional Excel */}
               {step === 1 && (
                 <div>
-                  <h2 style={{ fontSize: 16, fontWeight: 700, marginTop: 0, marginBottom: 8, color: "#1a1a1a" }}>レポートPDFをアップロード</h2>
+                  <h2 style={{ fontSize: 16, fontWeight: 700, marginTop: 0, marginBottom: 8, color: "#1a1a1a" }}>レポートをアップロード</h2>
                   <div style={{ fontSize: 13, color: "#666", marginBottom: 24 }}>
                     {clientName}｜{targetMonth}
                   </div>
@@ -675,11 +808,38 @@
                       </div>
                     ) : (
                       <div>
-                        <div style={{ fontWeight: 600, color: "#555", marginBottom: 4 }}>PDFをドラッグ＆ドロップ またはクリックして選択</div>
-                        <div style={{ fontSize: 12, color: "#999" }}>Instagramパフォーマンスレポート</div>
+                        <div style={{ fontWeight: 600, color: "#555", marginBottom: 4 }}>PDF をドラッグ＆ドロップ またはクリック</div>
+                        <div style={{ fontSize: 12, color: "#999" }}>Instagram パフォーマンスレポート（必須）</div>
                       </div>
                     )}
                     <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ display: "none" }} />
+                  </div>
+
+                  <div
+                    onClick={() => excelRef.current.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={handleDrop}
+                    style={{
+                      border: "2px dashed " + (excelText ? "#1a8a3e" : "#d0cdc6"),
+                      borderRadius: 12, padding: "24px 24px", textAlign: "center", cursor: "pointer",
+                      background: excelText ? "#f4f9f5" : "#fafaf8",
+                      transition: "all 0.2s",
+                      marginTop: 12
+                    }}
+                  >
+                    <div style={{ fontSize: 24, marginBottom: 8 }}>{excelText ? "✅" : "📊"}</div>
+                    {excelText ? (
+                      <div>
+                        <div style={{ fontWeight: 600, color: "#1a1a1a", marginBottom: 4 }}>{excelName}</div>
+                        <div style={{ fontSize: 12, color: "#888" }}>クリックして変更 / {excelText.length.toLocaleString()} 文字読込</div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div style={{ fontWeight: 600, color: "#555", marginBottom: 4 }}>Excel / CSV をドラッグ＆ドロップ（任意）</div>
+                        <div style={{ fontSize: 12, color: "#999" }}>補足データ。PDF と一緒に参考にされます</div>
+                      </div>
+                    )}
+                    <input ref={excelRef} type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" onChange={handleExcel} style={{ display: "none" }} />
                   </div>
 
                   <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
