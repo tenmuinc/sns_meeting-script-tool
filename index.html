@@ -323,24 +323,87 @@
           if (gijiroCandidates.length === 0) {
             throw new Error(`ワークスペースに議事録/定例会DBが見つかりませんでした（child_database ブロック: ${databaseBlocks.length}件、search結果: ${searchRes.results.length}件）`);
           }
-          // 候補が複数あるときは、クライアント名を含むDB or 該当クライアントへの relation を持つDBを優先
-          let gijiroDb = null;
-          for (const d of gijiroCandidates) {
-            const t = (d.title || []).map(x => x.plain_text || "").join("");
-            if (t.includes(clientName)) { gijiroDb = d; break; }
+          // クライアントごとに 議事録 DB が存在する構造に対応するため、
+          // 「親ページが、選択中のクライアントページの子孫であるか」を最優先で判定する。
+          // ① 親=クライアントページ そのもの
+          // ② 親=クライアントページの祖先（リトレース）
+          // ③ タイトルにクライアント名を含む
+          // ④ クライアントDBへの relation を持つ
+          // ⑤ 1件目（最終フォールバック）
+          const normId = (s) => String(s || '').replace(/-/g, '');
+          const clientPageIdNorm = normId(clientPageId);
+
+          // 各候補の祖先ページ ID を辿る
+          async function ancestorContainsClient(db) {
+            let parent = db.parent;
+            const visited = new Set();
+            for (let depth = 0; depth < 6; depth++) {
+              if (!parent) return false;
+              if (parent.type === 'page_id' && parent.page_id) {
+                const pid = normId(parent.page_id);
+                if (visited.has(pid)) return false;
+                visited.add(pid);
+                if (pid === clientPageIdNorm) return true;
+                // さらに親をたどる
+                try {
+                  const p = await notionProxy(`pages/${pid}`, 'GET');
+                  parent = p?.parent;
+                  continue;
+                } catch { return false; }
+              }
+              if (parent.type === 'database_id' && parent.database_id) {
+                try {
+                  const d = await notionProxy(`databases/${normId(parent.database_id)}`, 'GET');
+                  parent = d?.parent;
+                  continue;
+                } catch { return false; }
+              }
+              return false;
+            }
+            return false;
           }
+
+          let gijiroDb = null;
+          // ①親=クライアントページそのもの
+          for (const d of gijiroCandidates) {
+            const p = d.parent;
+            if (p?.type === 'page_id' && normId(p.page_id) === clientPageIdNorm) { gijiroDb = d; break; }
+          }
+          // ②祖先にクライアントページを含む
           if (!gijiroDb) {
-            // relation で クライアントDB を参照しているもの優先
+            for (const d of gijiroCandidates) {
+              // eslint-disable-next-line no-await-in-loop
+              if (await ancestorContainsClient(d)) { gijiroDb = d; break; }
+            }
+          }
+          // ③タイトルにクライアント名を含む
+          if (!gijiroDb) {
+            for (const d of gijiroCandidates) {
+              const t = (d.title || []).map(x => x.plain_text || "").join("");
+              if (clientName && t.includes(clientName)) { gijiroDb = d; break; }
+            }
+          }
+          // ④クライアントDBへの relation を持つ
+          if (!gijiroDb) {
             for (const d of gijiroCandidates) {
               const props = d.properties || {};
               const hasClientRelation = Object.values(props).some(p =>
                 p.type === "relation" && p.relation && p.relation.database_id &&
-                p.relation.database_id.replace(/-/g,"") === "ed23c3c0e73c49b1868751bd9326d181"
+                normId(p.relation.database_id) === "ed23c3c0e73c49b1868751bd9326d181"
               );
               if (hasClientRelation) { gijiroDb = d; break; }
             }
           }
-          if (!gijiroDb) gijiroDb = gijiroCandidates[0];
+          // ⑤ 候補が1件しかない場合のみフォールバック（複数あるなら間違える可能性が高いので例外）
+          if (!gijiroDb) {
+            if (gijiroCandidates.length === 1) {
+              gijiroDb = gijiroCandidates[0];
+              addLog(`⚠️ クライアントとの紐付けが特定できなかったため、唯一の候補「${(gijiroCandidates[0].title||[]).map(x=>x.plain_text).join('')||'(無題)'}」を使用`);
+            } else {
+              const list = gijiroCandidates.map(d=>(d.title||[]).map(x=>x.plain_text).join('')||'(無題)').join(', ');
+              throw new Error(`「${clientName}」用の議事録DBを特定できませんでした。候補が複数あります（${gijiroCandidates.length}件: ${list}）。Notion で「${clientName}」のページ配下に議事録DBを置くか、タイトルにクライアント名を含めてください。`);
+            }
+          }
           const gijiroDatabaseId = gijiroDb.id;
           const gijiroTitle = (gijiroDb.title || []).map(x => x.plain_text || "").join("") || "(無題)";
           addLog(`✅ 議事録DB発見: ${gijiroTitle}`);
